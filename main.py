@@ -196,6 +196,7 @@ class ReminderPlugin(BasePlugin):
             # 预处理时间字符串
             processed_time_str = self._preprocess_time_string(time_str)
             self.ap.logger.info(f"🔍 预处理后的时间字符串: {time_str} -> {processed_time_str}")
+            self.ap.logger.info(f"🔍 预处理后的时间字符串: {time_str} -> {processed_time_str}")
             
             # 先尝试使用dateparser，修复配置错误
             parsed_time = dateparser.parse(
