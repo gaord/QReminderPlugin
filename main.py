@@ -13,7 +13,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解 (v1.0.1 已修复发送问题)", version="1.0.1", author="Assistant")
+@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解 (v1.0.2 修复时间解析)", version="1.0.2", author="Assistant")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
@@ -88,7 +88,7 @@ class ReminderPlugin(BasePlugin):
         
         Args:
             content(str): 提醒内容，例如："开会"、"吃药"、"买菜"等
-            time_description(str): 时间描述，支持自然语言，例如："30分钟后"、"明天下午3点"、"今晚8点"等
+            time_description(str): 时间描述，支持自然语言，例如："30分钟后"、"明天下午3点"、"今晚8点"、"每周四晚上9点"等
             repeat_type(str): 重复类型，可选值："不重复"、"每天"、"每周"、"每月"
             
         Returns:
@@ -117,10 +117,10 @@ class ReminderPlugin(BasePlugin):
 📝 支持的时间格式示例：
 • 相对时间：30分钟后、2小时后、明天
 • 具体时间：明天上午9点、今晚8点、后天下午3点
-• 星期时间：下周四晚上9点、周五上午10点
+• 星期时间：下周四晚上9点、周五上午10点、这周四21:00
 • 重复时间：每天早上7点、每周一下午2点
 
-💡 请尝试使用更明确的时间表达，如"明天上午9点"或"下周四晚上9点"。"""
+💡 请尝试使用更明确的时间表达，如"这周四晚上9点"或"下周四21:00"。"""
 
             # 检查时间是否已过
             if target_time <= datetime.now():
@@ -184,62 +184,32 @@ class ReminderPlugin(BasePlugin):
         
         for weekday in weekdays:
             if weekday in time_lower:
-                # 如果没有明确说"下周"等限定词，默认为每周重复
-                if not any(word in time_lower for word in ['下周', '下个', '本周', '这周']):
+                # 如果没有明确说"下周"等限定词，并且有"每"字，默认为每周重复
+                if "每" in time_lower or not any(word in time_lower for word in ['下周', '下个', '本周', '这周']):
                     return "每周"
         
         return "不重复"
-
-    @handler(PersonNormalMessageReceived)
-    async def person_normal_message_received(self, ctx: EventContext):
-        await self._handle_message(ctx, False)
-
-    @handler(GroupNormalMessageReceived)
-    async def group_normal_message_received(self, ctx: EventContext):
-        await self._handle_message(ctx, True)
-
-    async def _handle_message(self, ctx: EventContext, is_group: bool):
-        """处理消息"""
-        msg = ctx.event.text_message.strip()
-        sender_id = str(ctx.event.sender_id)
-        
-        # 查看提醒列表
-        if msg in ["查看提醒", "提醒列表", "我的提醒"]:
-            await self._handle_list_reminders(ctx, sender_id)
-        
-        # 删除提醒
-        elif msg.startswith("删除提醒"):
-            await self._handle_delete_reminder(ctx, msg, sender_id)
-        
-        # 暂停/恢复提醒
-        elif msg.startswith("暂停提醒"):
-            await self._handle_pause_reminder(ctx, msg, sender_id)
-        elif msg.startswith("恢复提醒"):
-            await self._handle_resume_reminder(ctx, msg, sender_id)
-        
-        # 帮助信息
-        elif msg in ["提醒帮助", "定时提醒帮助"]:
-            await self._handle_help(ctx)
 
     async def _parse_time_natural(self, time_str: str) -> datetime:
         """增强的自然语言时间解析"""
         try:
             # 预处理时间字符串
             processed_time_str = self._preprocess_time_string(time_str)
+            self.ap.logger.info(f"🔍 预处理后的时间字符串: {time_str} -> {processed_time_str}")
             
-            # 先尝试使用dateparser，配置更多选项
+            # 先尝试使用dateparser，修复配置错误
             parsed_time = dateparser.parse(
                 processed_time_str, 
                 languages=['zh', 'en'],
                 settings={
-                    'PREFER_FUTURE': True,
+                    'PREFER_DATES_FROM': 'future',  # 修复：使用正确的设置项
                     'RETURN_AS_TIMEZONE_AWARE': False,
                     'DATE_ORDER': 'YMD',
-                    'PREFER_LANGUAGE_DATE_ORDER': True,
+                    'RELATIVE_BASE': datetime.now(),
                 }
             )
             
-            if parsed_time:
+            if parsed_time and parsed_time > datetime.now():
                 self.ap.logger.info(f"✅ dateparser解析成功: {time_str} -> {parsed_time}")
                 return parsed_time
             
@@ -254,6 +224,14 @@ class ReminderPlugin(BasePlugin):
             
         except Exception as e:
             self.ap.logger.error(f"❌ 解析时间异常: {e}")
+            # 如果dateparser失败，尝试手动解析
+            try:
+                manual_result = await self._parse_time_manual_enhanced(time_str)
+                if manual_result:
+                    self.ap.logger.info(f"✅ 异常恢复，手动解析成功: {time_str} -> {manual_result}")
+                    return manual_result
+            except Exception as manual_error:
+                self.ap.logger.error(f"❌ 手动解析也失败: {manual_error}")
             return None
 
     def _preprocess_time_string(self, time_str: str) -> str:
@@ -269,11 +247,16 @@ class ReminderPlugin(BasePlugin):
                           .replace('晚上', '下午').replace('夜里', '下午') \
                           .replace('中午', '12:00').replace('午夜', '00:00')
         
-        # 添加冒号
-        time_str = time_str.replace('点', ':00').replace('时', ':00')
+        # 处理点钟
+        time_str = time_str.replace('点钟', '点').replace('点', ':00').replace('时', ':00')
         
         # 处理半点
         time_str = time_str.replace(':00半', ':30')
+        
+        # 处理"每周X"格式 - 转换为"下周X"便于解析
+        if "每周" in time_str:
+            # 移除"每"字，保留周几信息，后续会在重复类型中处理
+            time_str = time_str.replace("每周", "下周")
         
         return time_str
 
@@ -296,13 +279,72 @@ class ReminderPlugin(BasePlugin):
         if "今天" in time_str or "今晚" in time_str or "今早" in time_str:
             return self._parse_today_time(time_str, now)
         
-        # 处理星期
-        for i, day_name in enumerate(['周一', '周二', '周三', '周四', '周五', '周六', '周日']):
-            if day_name in time_str or f'星期{["一","二","三","四","五","六","日"][i]}' in time_str:
-                return self._parse_weekday_time(time_str, i, now)
+        # 处理星期 - 增强处理
+        weekday_result = self._parse_weekday_time_enhanced(time_str, now)
+        if weekday_result:
+            return weekday_result
         
         # 处理具体时间点（如"21点"、"上午9点"）
         return self._parse_specific_time(time_str, now)
+
+    def _parse_weekday_time_enhanced(self, time_str: str, now: datetime) -> datetime:
+        """增强的星期时间解析"""
+        weekday_map = {
+            '周一': 0, '周二': 1, '周三': 2, '周四': 3, '周五': 4, '周六': 5, '周日': 6,
+            '星期一': 0, '星期二': 1, '星期三': 2, '星期四': 3, '星期五': 4, '星期六': 5, '星期日': 6,
+            'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3, 'friday': 4, 'saturday': 5, 'sunday': 6
+        }
+        
+        target_weekday = None
+        for weekday_name, weekday_num in weekday_map.items():
+            if weekday_name in time_str.lower():
+                target_weekday = weekday_num
+                break
+        
+        if target_weekday is None:
+            return None
+        
+        # 计算目标日期
+        current_weekday = now.weekday()
+        
+        # 判断是"这周"还是"下周"
+        if "下周" in time_str or "下个" in time_str:
+            days_ahead = (target_weekday - current_weekday) % 7 + 7
+        elif "这周" in time_str or "本周" in time_str:
+            days_ahead = (target_weekday - current_weekday) % 7
+            if days_ahead == 0:  # 今天是目标星期几
+                target_date = now.date()
+            else:
+                target_date = now.date() + timedelta(days=days_ahead)
+        else:
+            # 默认处理：如果是今天或已过的星期几，取下周；否则取本周
+            days_ahead = (target_weekday - current_weekday) % 7
+            if days_ahead == 0:  # 今天
+                days_ahead = 7  # 下周同一天
+            target_date = now.date() + timedelta(days=days_ahead)
+        
+        if "下周" in time_str or "下个" in time_str or "这周" not in time_str:
+            target_date = now.date() + timedelta(days=days_ahead)
+        
+        # 提取时间部分
+        time_part = self._extract_time_from_string(time_str)
+        if time_part:
+            target_datetime = datetime.combine(target_date, time_part)
+        else:
+            # 默认为晚上8点（对于"每周四"这种表达）
+            if "晚上" in time_str or "夜" in time_str:
+                default_time = datetime.strptime("20:00", "%H:%M").time()
+            elif "上午" in time_str or "早" in time_str:
+                default_time = datetime.strptime("09:00", "%H:%M").time()
+            else:
+                default_time = datetime.strptime("20:00", "%H:%M").time()
+            target_datetime = datetime.combine(target_date, default_time)
+        
+        # 确保时间在未来
+        if target_datetime <= now:
+            target_datetime += timedelta(days=7)
+        
+        return target_datetime
 
     def _parse_relative_time(self, time_str: str, now: datetime) -> datetime:
         """解析相对时间（X分钟后、X小时后等）"""
@@ -359,22 +401,6 @@ class ReminderPlugin(BasePlugin):
             return target
         
         return None
-
-    def _parse_weekday_time(self, time_str: str, weekday: int, now: datetime) -> datetime:
-        """解析星期X的时间"""
-        # 计算下一个指定星期几
-        days_ahead = weekday - now.weekday()
-        if days_ahead <= 0:  # 如果是今天或已过，取下周
-            days_ahead += 7
-        
-        target_date = now.date() + timedelta(days=days_ahead)
-        time_part = self._extract_time_from_string(time_str)
-        
-        if time_part:
-            return datetime.combine(target_date, time_part)
-        else:
-            # 默认为晚上8点
-            return datetime.combine(target_date, datetime.strptime("20:00", "%H:%M").time())
 
     def _parse_specific_time(self, time_str: str, now: datetime) -> datetime:
         """解析具体时间点"""
@@ -510,8 +536,6 @@ class ReminderPlugin(BasePlugin):
             self.ap.logger.error(traceback.format_exc())
             raise
 
-
-
     async def _handle_repeat_reminder(self, reminder_id: str, reminder_data: Dict):
         """处理重复提醒"""
         repeat_type = reminder_data.get('repeat_type', '不重复')
@@ -542,6 +566,37 @@ class ReminderPlugin(BasePlugin):
                 
                 # 安排下次提醒
                 await self._schedule_reminder(reminder_id, reminder_data)
+
+    @handler(PersonNormalMessageReceived)
+    async def person_normal_message_received(self, ctx: EventContext):
+        await self._handle_message(ctx, False)
+
+    @handler(GroupNormalMessageReceived)
+    async def group_normal_message_received(self, ctx: EventContext):
+        await self._handle_message(ctx, True)
+
+    async def _handle_message(self, ctx: EventContext, is_group: bool):
+        """处理消息"""
+        msg = ctx.event.text_message.strip()
+        sender_id = str(ctx.event.sender_id)
+        
+        # 查看提醒列表
+        if msg in ["查看提醒", "提醒列表", "我的提醒"]:
+            await self._handle_list_reminders(ctx, sender_id)
+        
+        # 删除提醒
+        elif msg.startswith("删除提醒"):
+            await self._handle_delete_reminder(ctx, msg, sender_id)
+        
+        # 暂停/恢复提醒
+        elif msg.startswith("暂停提醒"):
+            await self._handle_pause_reminder(ctx, msg, sender_id)
+        elif msg.startswith("恢复提醒"):
+            await self._handle_resume_reminder(ctx, msg, sender_id)
+        
+        # 帮助信息
+        elif msg in ["提醒帮助", "定时提醒帮助"]:
+            await self._handle_help(ctx)
 
     async def _handle_list_reminders(self, ctx: EventContext, sender_id: str):
         """处理查看提醒列表"""
@@ -662,6 +717,7 @@ class ReminderPlugin(BasePlugin):
 • "提醒我30分钟后开会"
 • "明天下午3点提醒我买菜"
 • "每天晚上8点提醒我吃药"
+• "这周四晚上9点提醒我看节目"
 
 📋 手动管理命令：
 • 查看提醒 - 查看所有提醒
@@ -672,6 +728,7 @@ class ReminderPlugin(BasePlugin):
 ⏰ 支持的时间格式：
 • 相对时间：30分钟后、2小时后、明天
 • 绝对时间：今晚8点、明天下午3点
+• 星期时间：这周四21:00、下周五上午10点
 • 重复类型：每天、每周、每月
 
 💡 使用技巧：
