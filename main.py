@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import re
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List
 import dateparser
@@ -11,7 +13,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解 (v1.0.1 已修复发送问题)", version="1.0.1", author="Assistant")
+@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解 (v1.0.1 已修复发送问题)", version="1.0.1", author="Assistant")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
@@ -100,10 +102,25 @@ class ReminderPlugin(BasePlugin):
                 "target_type": str(query.launcher_type).split(".")[-1].lower(),
             }
             
+            # 智能检测重复类型
+            detected_repeat_type = self._detect_repeat_type(time_description)
+            if detected_repeat_type != "不重复":
+                repeat_type = detected_repeat_type
+                self.ap.logger.info(f"🔄 自动检测到重复类型: {repeat_type}")
+            
             # 解析时间
             target_time = await self._parse_time_natural(time_description)
             if not target_time:
-                return f"⚠️ 时间格式无法识别：{time_description}。请使用如'30分钟后'、'明天下午3点'、'今晚8点'等格式"
+                # 给出更详细的时间格式提示
+                return f"""⚠️ 时间格式无法识别：{time_description}
+
+📝 支持的时间格式示例：
+• 相对时间：30分钟后、2小时后、明天
+• 具体时间：明天上午9点、今晚8点、后天下午3点
+• 星期时间：下周四晚上9点、周五上午10点
+• 重复时间：每天早上7点、每周一下午2点
+
+💡 请尝试使用更明确的时间表达，如"明天上午9点"或"下周四晚上9点"。"""
 
             # 检查时间是否已过
             if target_time <= datetime.now():
@@ -142,9 +159,36 @@ class ReminderPlugin(BasePlugin):
 
         except Exception as e:
             self.ap.logger.error(f"❌ 设置提醒失败: {e}")
-            import traceback
             self.ap.logger.error(traceback.format_exc())
             return f"❌ 设置提醒失败：{str(e)}"
+
+    def _detect_repeat_type(self, time_description: str) -> str:
+        """智能检测重复类型"""
+        time_lower = time_description.lower()
+        
+        # 检测每天
+        if any(word in time_lower for word in ['每天', '每日', '天天']):
+            return "每天"
+        
+        # 检测每周
+        if any(word in time_lower for word in ['每周', '每星期', '周周']):
+            return "每周"
+        
+        # 检测每月
+        if any(word in time_lower for word in ['每月', '每个月', '月月']):
+            return "每月"
+        
+        # 检测特定星期几（暗示每周重复）
+        weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日', 
+                   '星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
+        
+        for weekday in weekdays:
+            if weekday in time_lower:
+                # 如果没有明确说"下周"等限定词，默认为每周重复
+                if not any(word in time_lower for word in ['下周', '下个', '本周', '这周']):
+                    return "每周"
+        
+        return "不重复"
 
     @handler(PersonNormalMessageReceived)
     async def person_normal_message_received(self, ctx: EventContext):
@@ -178,54 +222,205 @@ class ReminderPlugin(BasePlugin):
             await self._handle_help(ctx)
 
     async def _parse_time_natural(self, time_str: str) -> datetime:
-        """使用dateparser解析自然语言时间"""
+        """增强的自然语言时间解析"""
         try:
-            # 使用dateparser解析自然语言时间
-            parsed_time = dateparser.parse(time_str, languages=['zh', 'en'])
+            # 预处理时间字符串
+            processed_time_str = self._preprocess_time_string(time_str)
+            
+            # 先尝试使用dateparser，配置更多选项
+            parsed_time = dateparser.parse(
+                processed_time_str, 
+                languages=['zh', 'en'],
+                settings={
+                    'PREFER_FUTURE': True,
+                    'RETURN_AS_TIMEZONE_AWARE': False,
+                    'DATE_ORDER': 'YMD',
+                    'PREFER_LANGUAGE_DATE_ORDER': True,
+                }
+            )
+            
             if parsed_time:
+                self.ap.logger.info(f"✅ dateparser解析成功: {time_str} -> {parsed_time}")
                 return parsed_time
             
-            # 如果dateparser失败，尝试手动解析一些常见格式
-            return await self._parse_time_manual(time_str)
+            # 如果dateparser失败，使用增强的手动解析
+            manual_result = await self._parse_time_manual_enhanced(time_str)
+            if manual_result:
+                self.ap.logger.info(f"✅ 手动解析成功: {time_str} -> {manual_result}")
+                return manual_result
+                
+            self.ap.logger.warning(f"⚠️ 时间解析失败: {time_str}")
+            return None
             
         except Exception as e:
-            self.ap.logger.error(f"解析时间失败: {e}")
+            self.ap.logger.error(f"❌ 解析时间异常: {e}")
             return None
 
-    async def _parse_time_manual(self, time_str: str) -> datetime:
-        """手动解析时间字符串"""
+    def _preprocess_time_string(self, time_str: str) -> str:
+        """预处理时间字符串，转换中文表达为更易识别的格式"""
+        # 数字转换
+        time_str = time_str.replace('一', '1').replace('二', '2').replace('三', '3') \
+                          .replace('四', '4').replace('五', '5').replace('六', '6') \
+                          .replace('七', '7').replace('八', '8').replace('九', '9') \
+                          .replace('十', '10').replace('零', '0')
+        
+        # 时间词汇转换
+        time_str = time_str.replace('早上', '上午').replace('早晨', '上午') \
+                          .replace('晚上', '下午').replace('夜里', '下午') \
+                          .replace('中午', '12:00').replace('午夜', '00:00')
+        
+        # 添加冒号
+        time_str = time_str.replace('点', ':00').replace('时', ':00')
+        
+        # 处理半点
+        time_str = time_str.replace(':00半', ':30')
+        
+        return time_str
+
+    async def _parse_time_manual_enhanced(self, time_str: str) -> datetime:
+        """增强的手动时间解析"""
         now = datetime.now()
+        time_str_lower = time_str.lower()
         
-        # 相对时间解析
+        # 处理相对时间
         if "后" in time_str:
-            time_str = time_str.replace("后", "")
-            if "分钟" in time_str:
-                minutes = int(''.join(filter(str.isdigit, time_str)))
-                return now + timedelta(minutes=minutes)
-            elif "小时" in time_str:
-                hours = int(''.join(filter(str.isdigit, time_str)))
-                return now + timedelta(hours=hours)
-            elif "天" in time_str:
-                days = int(''.join(filter(str.isdigit, time_str)))
-                return now + timedelta(days=days)
+            return self._parse_relative_time(time_str, now)
         
-        # 绝对时间解析
-        try:
-            # 完整日期时间格式
-            if " " in time_str and ":" in time_str:
-                return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-            
-            # 只有时间，默认为今天
-            elif ":" in time_str:
-                time_part = datetime.strptime(time_str, "%H:%M").time()
-                target = datetime.combine(now.date(), time_part)
-                # 如果时间已过，设为明天
-                if target <= now:
-                    target = target + timedelta(days=1)
-                return target
-                
-        except ValueError:
-            pass
+        # 处理明天/后天等
+        if "明天" in time_str:
+            return self._parse_tomorrow_time(time_str, now)
+        elif "后天" in time_str:
+            return self._parse_day_after_tomorrow_time(time_str, now)
+        
+        # 处理今天的时间
+        if "今天" in time_str or "今晚" in time_str or "今早" in time_str:
+            return self._parse_today_time(time_str, now)
+        
+        # 处理星期
+        for i, day_name in enumerate(['周一', '周二', '周三', '周四', '周五', '周六', '周日']):
+            if day_name in time_str or f'星期{["一","二","三","四","五","六","日"][i]}' in time_str:
+                return self._parse_weekday_time(time_str, i, now)
+        
+        # 处理具体时间点（如"21点"、"上午9点"）
+        return self._parse_specific_time(time_str, now)
+
+    def _parse_relative_time(self, time_str: str, now: datetime) -> datetime:
+        """解析相对时间（X分钟后、X小时后等）"""
+        time_str = time_str.replace("后", "")
+        
+        # 提取数字
+        numbers = re.findall(r'\d+', time_str)
+        if not numbers:
+            return None
+        
+        value = int(numbers[0])
+        
+        if "分钟" in time_str or "分" in time_str:
+            return now + timedelta(minutes=value)
+        elif "小时" in time_str or "时" in time_str:
+            return now + timedelta(hours=value)
+        elif "天" in time_str:
+            return now + timedelta(days=value)
+        elif "周" in time_str or "星期" in time_str:
+            return now + timedelta(weeks=value)
+        
+        return None
+
+    def _parse_tomorrow_time(self, time_str: str, now: datetime) -> datetime:
+        """解析明天的时间"""
+        tomorrow = now + timedelta(days=1)
+        time_part = self._extract_time_from_string(time_str)
+        
+        if time_part:
+            return datetime.combine(tomorrow.date(), time_part)
+        else:
+            # 如果没有具体时间，默认为明天9点
+            return datetime.combine(tomorrow.date(), datetime.strptime("09:00", "%H:%M").time())
+
+    def _parse_day_after_tomorrow_time(self, time_str: str, now: datetime) -> datetime:
+        """解析后天的时间"""
+        day_after_tomorrow = now + timedelta(days=2)
+        time_part = self._extract_time_from_string(time_str)
+        
+        if time_part:
+            return datetime.combine(day_after_tomorrow.date(), time_part)
+        else:
+            return datetime.combine(day_after_tomorrow.date(), datetime.strptime("09:00", "%H:%M").time())
+
+    def _parse_today_time(self, time_str: str, now: datetime) -> datetime:
+        """解析今天的时间"""
+        time_part = self._extract_time_from_string(time_str)
+        
+        if time_part:
+            target = datetime.combine(now.date(), time_part)
+            # 如果时间已过，设为明天
+            if target <= now:
+                target = target + timedelta(days=1)
+            return target
+        
+        return None
+
+    def _parse_weekday_time(self, time_str: str, weekday: int, now: datetime) -> datetime:
+        """解析星期X的时间"""
+        # 计算下一个指定星期几
+        days_ahead = weekday - now.weekday()
+        if days_ahead <= 0:  # 如果是今天或已过，取下周
+            days_ahead += 7
+        
+        target_date = now.date() + timedelta(days=days_ahead)
+        time_part = self._extract_time_from_string(time_str)
+        
+        if time_part:
+            return datetime.combine(target_date, time_part)
+        else:
+            # 默认为晚上8点
+            return datetime.combine(target_date, datetime.strptime("20:00", "%H:%M").time())
+
+    def _parse_specific_time(self, time_str: str, now: datetime) -> datetime:
+        """解析具体时间点"""
+        time_part = self._extract_time_from_string(time_str)
+        
+        if time_part:
+            target = datetime.combine(now.date(), time_part)
+            # 如果时间已过，设为明天
+            if target <= now:
+                target = target + timedelta(days=1)
+            return target
+        
+        return None
+
+    def _extract_time_from_string(self, time_str: str):
+        """从字符串中提取时间部分"""
+        # 处理各种时间格式
+        patterns = [
+            r'(\d{1,2}):(\d{2})',  # 21:00, 9:30
+            r'(\d{1,2})点(\d{1,2})',  # 9点30
+            r'(\d{1,2})时(\d{1,2})',  # 9时30
+            r'(\d{1,2})点',  # 21点, 9点
+            r'(\d{1,2})时',  # 21时, 9时
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, time_str)
+            if match:
+                try:
+                    if len(match.groups()) == 2:
+                        hour, minute = int(match.group(1)), int(match.group(2))
+                    else:
+                        hour, minute = int(match.group(1)), 0
+                    
+                    # 处理上午下午
+                    if "上午" in time_str or "早上" in time_str or "早晨" in time_str:
+                        if hour == 12:
+                            hour = 0
+                    elif "下午" in time_str or "晚上" in time_str:
+                        if hour < 12:
+                            hour += 12
+                    
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        return datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").time()
+                except ValueError:
+                    continue
         
         return None
 
@@ -274,7 +469,6 @@ class ReminderPlugin(BasePlugin):
             self.ap.logger.debug(f"⏹️ 提醒任务 {reminder_id} 被取消")
         except Exception as e:
             self.ap.logger.error(f"❌ 提醒任务执行失败: {e}")
-            import traceback
             self.ap.logger.error(traceback.format_exc())
 
     async def _send_reminder_message(self, reminder_data: Dict):
@@ -313,7 +507,6 @@ class ReminderPlugin(BasePlugin):
             
         except Exception as e:
             self.ap.logger.error(f"❌ 发送提醒消息失败: {e}")
-            import traceback
             self.ap.logger.error(traceback.format_exc())
             raise
 
