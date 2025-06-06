@@ -3,15 +3,19 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List
+import dateparser
+import logging
 from pkg.plugin.context import register, handler, llm_func, BasePlugin, APIHost, EventContext
 from pkg.plugin.events import *
+import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="ReminderPlugin", description="定时提醒插件，支持设置单次和重复提醒", version="1.0", author="Assistant")
+@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.0", author="Assistant")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
+        self.host = host
         self.reminders: Dict[str, Dict] = {}  # 存储提醒信息
         self.data_file = "reminders.json"
         self.running_tasks = {}  # 存储运行中的任务
@@ -30,6 +34,10 @@ class ReminderPlugin(BasePlugin):
             if os.path.exists(self.data_file):
                 with open(self.data_file, 'r', encoding='utf-8') as f:
                     self.reminders = json.load(f)
+                    # 转换旧格式的时间字符串为datetime对象
+                    for reminder_data in self.reminders.values():
+                        if isinstance(reminder_data.get('target_time'), str):
+                            reminder_data['target_time'] = reminder_data['target_time']
         except Exception as e:
             self.ap.logger.error(f"加载提醒数据失败: {e}")
             self.reminders = {}
@@ -38,29 +46,87 @@ class ReminderPlugin(BasePlugin):
         """保存提醒数据到文件"""
         try:
             with open(self.data_file, 'w', encoding='utf-8') as f:
-                json.dump(self.reminders, f, ensure_ascii=False, indent=2)
+                json.dump(self.reminders, f, ensure_ascii=False, indent=2, default=str)
         except Exception as e:
             self.ap.logger.error(f"保存提醒数据失败: {e}")
 
+    @llm_func("set_reminder")
+    async def set_reminder_llm(self, query, content: str, time_description: str, repeat_type: str = "不重复"):
+        """AI函数调用接口：设置提醒
+        当用户说要设置提醒、定时任务等时调用此函数
+        
+        Args:
+            content(str): 提醒内容，例如："开会"、"吃药"、"买菜"等
+            time_description(str): 时间描述，支持自然语言，例如："30分钟后"、"明天下午3点"、"今晚8点"等
+            repeat_type(str): 重复类型，可选值："不重复"、"每天"、"每周"、"每月"
+            
+        Returns:
+            str: 设置结果信息
+        """
+        try:
+            # 获取目标信息
+            target_info = {
+                "target_id": str(query.launcher_id),
+                "sender_id": str(query.sender_id), 
+                "target_type": str(query.launcher_type).split(".")[-1].lower(),
+            }
+            
+            # 解析时间
+            target_time = await self._parse_time_natural(time_description)
+            if not target_time:
+                return f"时间格式无法识别：{time_description}。请使用如'30分钟后'、'明天下午3点'、'今晚8点'等格式"
+
+            # 检查时间是否已过
+            if target_time <= datetime.now():
+                return "设置的时间已经过去了，请重新设置！"
+
+            # 生成提醒ID
+            reminder_id = f"{target_info['sender_id']}_{int(datetime.now().timestamp())}"
+            
+            # 创建提醒数据
+            reminder_data = {
+                'id': reminder_id,
+                'sender_id': target_info['sender_id'],
+                'target_id': target_info['target_id'],
+                'target_type': target_info['target_type'],
+                'content': content,
+                'target_time': target_time.isoformat(),
+                'repeat_type': repeat_type,
+                'active': True,
+                'created_at': datetime.now().isoformat()
+            }
+
+            # 保存提醒
+            self.reminders[reminder_id] = reminder_data
+            await self._save_reminders()
+
+            # 安排提醒任务
+            await self._schedule_reminder(reminder_id, reminder_data)
+
+            # 返回确认信息
+            time_str_formatted = target_time.strftime("%Y-%m-%d %H:%M")
+            repeat_info = f"，重复类型：{repeat_type}" if repeat_type != "不重复" else ""
+            return f"✅ 提醒设置成功！\n时间：{time_str_formatted}\n内容：{content}{repeat_info}"
+
+        except Exception as e:
+            self.ap.logger.error(f"设置提醒失败: {e}")
+            return f"设置提醒失败：{str(e)}"
+
     @handler(PersonNormalMessageReceived)
     async def person_normal_message_received(self, ctx: EventContext):
-        await self._handle_message(ctx, is_group=False)
+        await self._handle_message(ctx, False)
 
     @handler(GroupNormalMessageReceived)
     async def group_normal_message_received(self, ctx: EventContext):
-        await self._handle_message(ctx, is_group=True)
+        await self._handle_message(ctx, True)
 
     async def _handle_message(self, ctx: EventContext, is_group: bool):
         """处理消息"""
         msg = ctx.event.text_message.strip()
-        sender_id = ctx.event.sender_id
-        
-        # 设置提醒命令
-        if msg.startswith("提醒我"):
-            await self._handle_set_reminder(ctx, msg, sender_id, is_group)
+        sender_id = str(ctx.event.sender_id)
         
         # 查看提醒列表
-        elif msg == "查看提醒" or msg == "提醒列表":
+        if msg in ["查看提醒", "提醒列表", "我的提醒"]:
             await self._handle_list_reminders(ctx, sender_id)
         
         # 删除提醒
@@ -74,84 +140,39 @@ class ReminderPlugin(BasePlugin):
             await self._handle_resume_reminder(ctx, msg, sender_id)
         
         # 帮助信息
-        elif msg == "提醒帮助":
+        elif msg in ["提醒帮助", "定时提醒帮助"]:
             await self._handle_help(ctx)
 
-    async def _handle_set_reminder(self, ctx: EventContext, msg: str, sender_id: str, is_group: bool):
-        """处理设置提醒命令"""
+    async def _parse_time_natural(self, time_str: str) -> datetime:
+        """使用dateparser解析自然语言时间"""
         try:
-            # 解析命令格式: 提醒我 [时间] [内容] [重复类型]
-            parts = msg.split(" ", 3)
-            if len(parts) < 3:
-                ctx.add_return("reply", ["格式错误！使用方法：\n提醒我 [时间] [内容] [重复类型(可选)]\n例如：提醒我 10分钟后 开会\n或：提醒我 2024-01-01 12:00 新年快乐 每天"])
-                ctx.prevent_default()
-                return
-
-            time_str = parts[1]
-            content = parts[2]
-            repeat_type = parts[3] if len(parts) > 3 else "不重复"
-
-            # 解析时间
-            target_time = await self._parse_time(time_str)
-            if not target_time:
-                ctx.add_return("reply", ["时间格式错误！支持的格式：\n- 相对时间：10分钟后, 2小时后, 1天后\n- 绝对时间：2024-01-01 12:00\n- 简单时间：12:00"])
-                ctx.prevent_default()
-                return
-
-            # 检查时间是否已过
-            if target_time <= datetime.now():
-                ctx.add_return("reply", ["设置的时间已经过去了，请重新设置！"])
-                ctx.prevent_default()
-                return
-
-            # 生成提醒ID
-            reminder_id = f"{sender_id}_{len(self.reminders)}"
+            # 使用dateparser解析自然语言时间
+            parsed_time = dateparser.parse(time_str, languages=['zh', 'en'])
+            if parsed_time:
+                return parsed_time
             
-            # 创建提醒数据
-            reminder_data = {
-                'id': reminder_id,
-                'sender_id': sender_id,
-                'content': content,
-                'target_time': target_time.isoformat(),
-                'repeat_type': repeat_type,
-                'is_group': is_group,
-                'active': True,
-                'created_at': datetime.now().isoformat()
-            }
-
-            # 保存提醒
-            self.reminders[reminder_id] = reminder_data
-            await self._save_reminders()
-
-            # 安排提醒任务
-            await self._schedule_reminder(reminder_id, reminder_data)
-
-            # 回复确认
-            time_str_formatted = target_time.strftime("%Y-%m-%d %H:%M")
-            repeat_info = f"，重复类型：{repeat_type}" if repeat_type != "不重复" else ""
-            ctx.add_return("reply", [f"✅ 提醒设置成功！\n时间：{time_str_formatted}\n内容：{content}{repeat_info}"])
-            ctx.prevent_default()
-
+            # 如果dateparser失败，尝试手动解析一些常见格式
+            return await self._parse_time_manual(time_str)
+            
         except Exception as e:
-            self.ap.logger.error(f"设置提醒失败: {e}")
-            ctx.add_return("reply", ["设置提醒失败，请检查命令格式！"])
-            ctx.prevent_default()
+            self.ap.logger.error(f"解析时间失败: {e}")
+            return None
 
-    async def _parse_time(self, time_str: str) -> datetime:
-        """解析时间字符串"""
+    async def _parse_time_manual(self, time_str: str) -> datetime:
+        """手动解析时间字符串"""
         now = datetime.now()
         
         # 相对时间解析
         if "后" in time_str:
             time_str = time_str.replace("后", "")
             if "分钟" in time_str:
-                minutes = int(time_str.replace("分钟", ""))
+                minutes = int(''.join(filter(str.isdigit, time_str)))
                 return now + timedelta(minutes=minutes)
             elif "小时" in time_str:
-                hours = int(time_str.replace("小时", ""))
+                hours = int(''.join(filter(str.isdigit, time_str)))
                 return now + timedelta(hours=hours)
             elif "天" in time_str:
-                days = int(time_str.replace("天", ""))
+                days = int(''.join(filter(str.isdigit, time_str)))
                 return now + timedelta(days=days)
         
         # 绝对时间解析
@@ -184,6 +205,7 @@ class ReminderPlugin(BasePlugin):
                 # 创建异步任务
                 task = asyncio.create_task(self._reminder_task(reminder_id, delay))
                 self.running_tasks[reminder_id] = task
+                self.ap.logger.debug(f"安排提醒任务 {reminder_id}，延迟 {delay} 秒")
                 
         except Exception as e:
             self.ap.logger.error(f"安排提醒任务失败: {e}")
@@ -211,14 +233,23 @@ class ReminderPlugin(BasePlugin):
     async def _send_reminder_message(self, reminder_data: Dict):
         """发送提醒消息"""
         try:
-            message = f"⏰ 提醒：{reminder_data['content']}"
+            message_content = f"⏰ 提醒：{reminder_data['content']}"
             
-            # 这里需要根据实际的API接口来发送消息
-            # 由于缺少具体的发送接口，这里只是记录日志
-            self.ap.logger.info(f"发送提醒给 {reminder_data['sender_id']}: {message}")
+            # 构建消息链
+            message_chain = platform_types.MessageChain([
+                platform_types.At(reminder_data['sender_id']),
+                platform_types.Plain(f" {message_content}")
+            ])
             
-            # 实际实现中，你需要调用相应的API来发送消息
-            # 例如：await self.ap.send_message(reminder_data['sender_id'], message, reminder_data['is_group'])
+            # 发送消息
+            await self.host.send_active_message(
+                adapter=self.host.get_platform_adapters()[0],
+                target_type=reminder_data['target_type'],
+                target_id=reminder_data['target_id'],
+                message=message_chain
+            )
+            
+            self.ap.logger.info(f"发送提醒给 {reminder_data['sender_id']}: {message_content}")
             
         except Exception as e:
             self.ap.logger.error(f"发送提醒消息失败: {e}")
@@ -232,6 +263,8 @@ class ReminderPlugin(BasePlugin):
             if reminder_id in self.reminders:
                 del self.reminders[reminder_id]
                 await self._save_reminders()
+                if reminder_id in self.running_tasks:
+                    del self.running_tasks[reminder_id]
         else:
             # 计算下次提醒时间
             current_time = datetime.fromisoformat(reminder_data['target_time'])
@@ -366,24 +399,25 @@ class ReminderPlugin(BasePlugin):
         """处理帮助命令"""
         help_text = """📖 定时提醒插件使用说明：
 
-🔧 设置提醒：
-• 提醒我 [时间] [内容] [重复类型(可选)]
-• 时间格式：
-  - 相对时间：10分钟后, 2小时后, 1天后
-  - 绝对时间：2024-01-01 12:00
-  - 简单时间：12:00 (今天，如已过则明天)
-• 重复类型：不重复(默认), 每天, 每周, 每月
+🤖 AI智能设置（推荐）：
+直接对我说话，例如：
+• "提醒我30分钟后开会"
+• "明天下午3点提醒我买菜"
+• "每天晚上8点提醒我吃药"
 
-📋 管理提醒：
+📋 手动管理命令：
 • 查看提醒 - 查看所有提醒
 • 删除提醒 [序号] - 删除指定提醒
 • 暂停提醒 [序号] - 暂停指定提醒
 • 恢复提醒 [序号] - 恢复指定提醒
 
-💡 示例：
-• 提醒我 30分钟后 开会
-• 提醒我 18:00 下班回家 每天
-• 提醒我 2024-12-25 12:00 圣诞快乐"""
+⏰ 支持的时间格式：
+• 相对时间：30分钟后、2小时后、明天
+• 绝对时间：今晚8点、明天下午3点
+• 重复类型：每天、每周、每月
+
+💡 使用技巧：
+AI会自动理解你的自然语言，无需记忆复杂命令格式！"""
         
         ctx.add_return("reply", [help_text])
         ctx.prevent_default()
