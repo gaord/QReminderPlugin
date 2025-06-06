@@ -1,31 +1,63 @@
-apiVersion: v1  # 不要改动
-kind: Plugin  # 不要改动
+apiVersion: v1
+kind: Plugin
 metadata:
-  # author 和 name 唯一确定一个插件
-  author: langbot  # 插件作者，修改为你的名称
-  name: Hello  # 插件名称，修改为你的插件名称
-  repository: 'https://github.com/langbot-app/HelloPlugin'  # 插件仓库地址，修改为你的插件 GitHub 仓库地址
-  version: 0.1.0  # 插件版本，修改为你的插件版本
-  description:  # 插件简介，修改为你的插件简介，支持多语言
-    en_US: Plugin for sending hello
-    zh_CN: 示例插件
-  label:  # 插件显示名称，支持多语言。在 WebUI 上会显示对应语言的 label
-    en_US: Hello
-    zh_CN: Hello
+  author: Assistant
+  name: ReminderPlugin
+  repository: 'https://github.com/your-username/ReminderPlugin'
+  version: 1.0.0
+  description:
+    en_US: A powerful reminder plugin with support for one-time and recurring reminders
+    zh_CN: 功能强大的定时提醒插件，支持单次和重复提醒
+  label:
+    en_US: Reminder Plugin
+    zh_CN: 定时提醒插件
 spec:
-  # 插件配置（可选），可配置多项
   config:
-    - name: github_token  # 配置项名称
-      label:  # 配置项显示名称，支持多语言
-        en_US: Github Token
-        zh_CN: Github Token
-      description:  # 配置项描述，支持多语言
-        en_US: Image downloading requires a Github token
-        zh_CN: 如果不填的话，图片可能会下载失败
-      type: string  # 配置项类型，支持 string, integer, float, boolean 等
-      default: ''  # 配置项默认值
-      required: false  # 配置项是否必填
+    - name: max_reminders_per_user
+      label:
+        en_US: Max Reminders Per User
+        zh_CN: 每个用户最大提醒数量
+      description:
+        en_US: Maximum number of reminders each user can set
+        zh_CN: 每个用户可以设置的最大提醒数量
+      type: integer
+      default: 50
+      required: false
+    
+    - name: reminder_advance_notice
+      label:
+        en_US: Advance Notice (minutes)
+        zh_CN: 提前通知时间（分钟）
+      description:
+        en_US: Send an advance notice before the actual reminder
+        zh_CN: 在正式提醒前发送提前通知
+      type: integer
+      default: 0
+      required: false
+    
+    - name: enable_group_reminders
+      label:
+        en_US: Enable Group Reminders
+        zh_CN: 启用群组提醒
+      description:
+        en_US: Allow users to set reminders in group chats
+        zh_CN: 允许用户在群聊中设置提醒
+      type: boolean
+      default: true
+      required: false
+    
+    - name: timezone
+      label:
+        en_US: Timezone
+        zh_CN: 时区
+      description:
+        en_US: Default timezone for reminders
+        zh_CN: 提醒的默认时区
+      type: string
+      default: 'Asia/Shanghai'
+      required: false
+
 execution:
   python:
-    path: main.py  # 插件主程序路径，必须与上方插件入口代码的文件名相同
-    attr: HelloPlugin  # 插件类名，必须与上方代码中声明的类名相同
+    path: main.py
+    attr: ReminderPlugin
