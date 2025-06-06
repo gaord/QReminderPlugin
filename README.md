@@ -45,6 +45,7 @@
 ### 安装方式
 
 1. **通过插件管理页面安装**：
+
 **手动安装**：
    ```bash
    git clone https://github.com/Wedjat98/QReminderPlugin
