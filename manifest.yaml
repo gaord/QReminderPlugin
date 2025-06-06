@@ -34,6 +34,7 @@ spec:
       label:
         zh_CN: 启用Q群提醒
       description:
+        en_US: Allow users to set reminders in group chats
         zh_CN: 允许用户在群聊中设置提醒
       type: boolean
       default: true
@@ -41,8 +42,10 @@ spec:
     
     - name: timezone
       label:
+        en_US: Timezone
         zh_CN: 时区
       description:
+        en_US: Default timezone for reminders
         zh_CN: 提醒的默认时区
       type: string
       default: 'Asia/Shanghai'
