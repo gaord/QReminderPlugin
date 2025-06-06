@@ -2,7 +2,7 @@
 
 基于AI函数调用的智能定时提醒插件，支持自然语言交互和传统命令管理，为LangBot用户提供便捷的定时任务功能。
 
-> 🔧 **v1.0.1 重大更新**：已修复消息发送失败问题，确保提醒能够稳定送达！
+> 🔧 **v1.1.0 重大更新**：已修复消息发送失败问题，确保提醒能够稳定送达！
 
 ## 🔧 技术改进 (v1.1.0)
 
@@ -45,15 +45,9 @@
 ### 安装方式
 
 1. **通过插件管理页面安装**：
-   - 配置完成 [LangBot](https://github.com/RockChinQ/LangBot) 主程序
-   - 进入插件管理页面
-   - 搜索并安装"智能定时提醒插件"
-
-2. **手动安装**：
+**手动安装**：
    ```bash
-   # 下载插件文件到LangBot插件目录
-   git clone https://github.com/your-username/ReminderPlugin
-   # 重启LangBot或重新加载插件
+   git clone https://github.com/Wedjat98/QReminderPlugin
    ```
 
 ## 📖 使用指南
@@ -196,32 +190,6 @@ ReminderPlugin/
 | `enable_group_reminders` | true | 是否启用群组提醒 |
 | `timezone` | Asia/Shanghai | 默认时区设置 |
 
-## 🔍 故障排除
-
-## 🔍 故障排除
-
-### 常见问题解答
-
-**Q: 出现 `aiocqhttp.exceptions.ApiNotAvailable` 错误？**
-A: ✅ **已修复**！v1.0.1版本已解决此问题。如仍遇到此错误，请：
-- 检查LangBot是否正常运行
-- 确认QQ机器人在线状态
-- 重启LangBot服务
-
-**Q: AI无法理解我的时间表达？**
-A: 尝试使用更明确的时间表达，如"明天下午3点"而不是"明天下午"。
-
-**Q: 提醒没有按时触发？**
-A: 检查系统时间是否正确，确保LangBot正常运行且插件已激活。
-
-**Q: 在群聊中设置提醒后没有收到@？**
-A: 确认机器人在群聊中有发言权限，插件会自动@设置提醒的用户。
-
-**Q: 重启后提醒消失了？**
-A: 检查插件目录下是否有`reminders.json`文件，确保文件格式正确。
-
-**Q: 如何批量删除提醒？**
-A: 目前需要逐个删除，可以先用"查看提醒"查看序号，然后依次删除。
 
 ### 调试信息
 
@@ -238,47 +206,6 @@ A: 目前需要逐个删除，可以先用"查看提醒"查看序号，然后依
 ```bash
 # 备份提醒数据
 cp reminders.json reminders_backup_$(date +%Y%m%d).json
-```
-
-## 🔄 更新日志
-
-### v1.0.0 (当前版本)
-- ✨ 新增AI函数调用支持
-- ✨ 自然语言时间解析
-- ✨ 智能消息发送机制
-- ✨ 完善的提醒管理功能
-- ✨ 数据持久化存储
-- ✨ 异步任务管理
-- ✨ 群聊和私聊支持
-
-### 未来计划
-- 🔄 定时任务的cron表达式支持
-- 📱 微信小程序推送集成
-- 🌍 多时区支持
-- 📊 提醒统计和分析
-- 🔔 自定义提醒铃声
-
-## 🤝 贡献指南
-
-欢迎参与插件开发！你可以：
-
-1. **报告问题**：在GitHub提交Issue
-2. **功能建议**：提出新功能想法
-3. **代码贡献**：提交Pull Request
-4. **文档改进**：完善使用说明
-
-### 开发环境
-
-```bash
-# 克隆项目
-git clone https://github.com/your-username/ReminderPlugin
-cd ReminderPlugin
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 运行测试
-python -m pytest tests/
 ```
 
 ## 📄 许可证
