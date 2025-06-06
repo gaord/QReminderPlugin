@@ -265,11 +265,4 @@ python -m pytest tests/
 
 ---
 
-**💬 获取帮助**
-
-如有问题或建议，欢迎：
-- 📧 发送邮件：your-email@example.com
-- 💬 加入讨论群：[群号码]
-- 🐛 提交Issue：[GitHub Issues](https://github.com/your-username/ReminderPlugin/issues)
-
 智能提醒让生活更有序！🎯
