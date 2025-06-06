@@ -35,12 +35,7 @@
    git clone https://github.com/your-username/ReminderPlugin
    # 重启LangBot或重新加载插件
    ```
-
-### 依赖要求
-- LangBot 主程序
-- Python 3.8+
-- dateparser>=1.1.0
-
+   
 ## 📖 使用指南
 
 ### 🌟 智能AI设置（推荐使用）
