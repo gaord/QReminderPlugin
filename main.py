@@ -11,7 +11,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.0", author="Assistant")
+@register(name="ReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解 (v1.0.1 已修复发送问题)", version="1.0.1", author="Assistant")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
@@ -26,27 +26,35 @@ class ReminderPlugin(BasePlugin):
         # 检查适配器可用性
         await self._check_adapter_availability()
         
+        # 加载已保存的提醒
         await self._load_reminders()
-        # 恢复所有提醒任务
+        
+        # 恢复所有活跃的提醒任务
+        restored_count = 0
         for reminder_id, reminder_data in self.reminders.items():
             if reminder_data.get('active', True):
-                await self._schedule_reminder(reminder_id, reminder_data)
+                # 检查提醒时间是否还未到
+                target_time = datetime.fromisoformat(reminder_data['target_time'])
+                if target_time > datetime.now():
+                    await self._schedule_reminder(reminder_id, reminder_data)
+                    restored_count += 1
+                else:
+                    self.ap.logger.info(f"⏰ 跳过已过期的提醒: {reminder_data['content']}")
+        
+        self.ap.logger.info(f"🚀 提醒插件初始化完成，恢复了 {restored_count} 个活跃提醒任务")
 
     async def _check_adapter_availability(self):
         """检查适配器可用性"""
         try:
             adapters = self.host.get_platform_adapters()
             if adapters and len(adapters) > 0:
-                adapter = adapters[0]
-                if hasattr(adapter, 'send_message'):
-                    self.adapter_available = True
-                    self.ap.logger.info(f"适配器检查通过，类型: {type(adapter).__name__}")
-                else:
-                    self.ap.logger.warning("适配器不支持send_message方法")
+                self.adapter_available = True
+                self.ap.logger.info(f"✅ 适配器检查通过，共找到 {len(adapters)} 个适配器")
             else:
-                self.ap.logger.warning("没有找到可用的平台适配器")
+                self.ap.logger.warning("⚠️ 没有找到可用的平台适配器")
+                self.adapter_available = False
         except Exception as e:
-            self.ap.logger.error(f"检查适配器时出错: {e}")
+            self.ap.logger.error(f"❌ 检查适配器时出错: {e}")
             self.adapter_available = False
 
     async def _load_reminders(self):
@@ -85,12 +93,7 @@ class ReminderPlugin(BasePlugin):
             str: 设置结果信息
         """
         try:
-            # 检查适配器可用性
-            await self._check_adapter_availability()
-            if not self.adapter_available:
-                return "⚠️ 当前消息发送功能不可用，提醒可能无法正常发送。请稍后重试或联系管理员检查机器人连接状态。"
-            
-            # 获取目标信息
+            # 获取目标信息 - 参考Async_Task_runner的实现
             target_info = {
                 "target_id": str(query.launcher_id),
                 "sender_id": str(query.sender_id), 
@@ -132,10 +135,13 @@ class ReminderPlugin(BasePlugin):
             # 返回确认信息
             time_str_formatted = target_time.strftime("%Y-%m-%d %H:%M")
             repeat_info = f"，重复类型：{repeat_type}" if repeat_type != "不重复" else ""
-            return f"✅ 提醒设置成功！\n时间：{time_str_formatted}\n内容：{content}{repeat_info}"
+            
+            self.ap.logger.info(f"🎯 用户 {target_info['sender_id']} 设置提醒成功: {content} 在 {time_str_formatted}")
+            
+            return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted}\n📝 内容：{content}{repeat_info}"
 
         except Exception as e:
-            self.ap.logger.error(f"设置提醒失败: {e}")
+            self.ap.logger.error(f"❌ 设置提醒失败: {e}")
             import traceback
             self.ap.logger.error(traceback.format_exc())
             return f"❌ 设置提醒失败：{str(e)}"
@@ -247,29 +253,27 @@ class ReminderPlugin(BasePlugin):
             if reminder_id in self.reminders and self.reminders[reminder_id].get('active', True):
                 reminder_data = self.reminders[reminder_id]
                 
-                # 重新检查适配器可用性
-                await self._check_adapter_availability()
-                
-                if not self.adapter_available:
-                    self.ap.logger.warning(f"适配器不可用，提醒 {reminder_id} 暂时无法发送，将重试")
-                    # 延迟重试
-                    await asyncio.sleep(60)  # 等待1分钟后重试
-                    await self._check_adapter_availability()
-                
-                if self.adapter_available:
-                    # 发送提醒消息
+                # 发送提醒消息
+                try:
                     await self._send_reminder_message(reminder_data)
-                    
-                    # 处理重复提醒
-                    await self._handle_repeat_reminder(reminder_id, reminder_data)
-                else:
-                    self.ap.logger.error(f"适配器仍然不可用，提醒 {reminder_id} 发送失败")
-                    # 可以选择稍后重试或者记录失败日志
+                    self.ap.logger.info(f"🎯 提醒任务 {reminder_id} 执行成功")
+                except Exception as send_error:
+                    self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 发送失败: {send_error}")
+                    # 如果发送失败，可以选择重试一次
+                    await asyncio.sleep(30)  # 等待30秒
+                    try:
+                        await self._send_reminder_message(reminder_data)
+                        self.ap.logger.info(f"🎯 提醒任务 {reminder_id} 重试成功")
+                    except Exception as retry_error:
+                        self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 重试也失败: {retry_error}")
+                
+                # 处理重复提醒
+                await self._handle_repeat_reminder(reminder_id, reminder_data)
                     
         except asyncio.CancelledError:
-            self.ap.logger.debug(f"提醒任务 {reminder_id} 被取消")
+            self.ap.logger.debug(f"⏹️ 提醒任务 {reminder_id} 被取消")
         except Exception as e:
-            self.ap.logger.error(f"提醒任务执行失败: {e}")
+            self.ap.logger.error(f"❌ 提醒任务执行失败: {e}")
             import traceback
             self.ap.logger.error(traceback.format_exc())
 
@@ -278,21 +282,13 @@ class ReminderPlugin(BasePlugin):
         try:
             message_content = f"⏰ 提醒：{reminder_data['content']}"
             
-            # 获取可用的适配器
+            # 获取适配器
             adapters = self.host.get_platform_adapters()
             if not adapters:
                 self.ap.logger.error("没有可用的平台适配器")
                 return
             
-            # 选择第一个可用的适配器
-            adapter = adapters[0]
-            
-            # 检查适配器状态
-            if not hasattr(adapter, 'send_message'):
-                self.ap.logger.error("适配器不支持send_message方法")
-                return
-            
-            # 构建消息链
+            # 构建消息链 - 参考Waifu插件的实现
             if reminder_data['target_type'] == 'group':
                 # 群聊中@用户
                 message_chain = platform_types.MessageChain([
@@ -305,48 +301,23 @@ class ReminderPlugin(BasePlugin):
                     platform_types.Plain(message_content)
                 ])
             
-            # 尝试发送消息
-            await adapter.send_message(
+            # 使用 host.send_active_message 方法 - 参考Waifu和Async_Task_runner的实现
+            await self.host.send_active_message(
+                adapter=adapters[0],
                 target_type=reminder_data['target_type'],
                 target_id=reminder_data['target_id'],
                 message=message_chain
             )
             
-            self.ap.logger.info(f"发送提醒给 {reminder_data['sender_id']}: {message_content}")
+            self.ap.logger.info(f"✅ 成功发送提醒给 {reminder_data['sender_id']}: {message_content}")
             
         except Exception as e:
-            self.ap.logger.error(f"发送提醒消息失败: {e}")
-            
-            # 尝试备用发送方法
-            try:
-                await self._fallback_send_message(reminder_data, message_content)
-            except Exception as fallback_error:
-                self.ap.logger.error(f"备用发送方法也失败: {fallback_error}")
-
-    async def _fallback_send_message(self, reminder_data: Dict, message_content: str):
-        """备用消息发送方法"""
-        try:
-            # 使用host的send_active_message方法
-            adapters = self.host.get_platform_adapters()
-            if adapters:
-                message_chain = platform_types.MessageChain([
-                    platform_types.Plain(message_content)
-                ])
-                
-                await self.host.send_active_message(
-                    adapter=adapters[0],
-                    target_type=reminder_data['target_type'],
-                    target_id=reminder_data['target_id'],
-                    message=message_chain
-                )
-                
-                self.ap.logger.info(f"通过备用方法发送提醒: {message_content}")
-            else:
-                self.ap.logger.error("没有可用的适配器进行备用发送")
-                
-        except Exception as e:
-            self.ap.logger.error(f"备用发送方法失败: {e}")
+            self.ap.logger.error(f"❌ 发送提醒消息失败: {e}")
+            import traceback
+            self.ap.logger.error(traceback.format_exc())
             raise
+
+
 
     async def _handle_repeat_reminder(self, reminder_id: str, reminder_data: Dict):
         """处理重复提醒"""
