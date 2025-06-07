@@ -3,7 +3,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 import calendar
 import dateparser
 import logging
@@ -13,7 +13,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.1.0", author="Wedjat98")
+@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.2.0", author="Wedjat98")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
@@ -21,13 +21,11 @@ class ReminderPlugin(BasePlugin):
         self.reminders: Dict[str, Dict] = {}  # 存储提醒信息
         self.data_file = "reminders.json"
         self.running_tasks = {}  # 存储运行中的任务
-        self.adapter_available = False  # 适配器可用状态
+        self.adapter_cache = None  # 缓存适配器
+        self.last_adapter_check = None  # 最后检查适配器的时间
         
     async def initialize(self):
         """异步初始化，加载已保存的提醒"""
-        # 检查适配器可用性
-        await self._check_adapter_availability()
-        
         # 加载已保存的提醒
         await self._load_reminders()
         
@@ -45,19 +43,28 @@ class ReminderPlugin(BasePlugin):
         
         self.ap.logger.info(f"🚀 提醒插件初始化完成，恢复了 {restored_count} 个活跃提醒任务")
 
-    async def _check_adapter_availability(self):
-        """检查适配器可用性"""
+    async def _get_available_adapter(self):
+        """获取可用的适配器，带缓存机制"""
         try:
+            # 如果缓存存在且在5分钟内，直接返回
+            if self.adapter_cache and self.last_adapter_check:
+                if (datetime.now() - self.last_adapter_check).seconds < 300:
+                    return self.adapter_cache
+            
+            # 重新获取适配器
             adapters = self.host.get_platform_adapters()
             if adapters and len(adapters) > 0:
-                self.adapter_available = True
-                self.ap.logger.info(f"✅ 适配器检查通过，共找到 {len(adapters)} 个适配器")
+                self.adapter_cache = adapters[0]
+                self.last_adapter_check = datetime.now()
+                self.ap.logger.debug(f"✅ 成功获取适配器: {type(self.adapter_cache)}")
+                return self.adapter_cache
             else:
                 self.ap.logger.warning("⚠️ 没有找到可用的平台适配器")
-                self.adapter_available = False
+                return None
+                
         except Exception as e:
-            self.ap.logger.error(f"❌ 检查适配器时出错: {e}")
-            self.adapter_available = False
+            self.ap.logger.error(f"❌ 获取适配器时出错: {e}")
+            return None
 
     async def _load_reminders(self):
         """从文件加载提醒数据"""
@@ -95,17 +102,39 @@ class ReminderPlugin(BasePlugin):
             str: 设置结果信息
         """
         try:
-            # 获取目标信息 - 参考Async_Task_runner的实现
+            # 移除可能的干扰词
+            time_description = time_description.replace("设置", "").replace("这里", "").strip()
+            
+            # 自动检测重复类型
+            if "每天" in time_description and repeat_type == "不重复":
+                repeat_type = "每天"
+                time_description = time_description.replace("每天", "")
+            elif "每周" in time_description and repeat_type == "不重复":
+                repeat_type = "每周"
+                time_description = time_description.replace("每周", "")
+            elif "每月" in time_description and repeat_type == "不重复":
+                repeat_type = "每月"
+                time_description = time_description.replace("每月", "")
+            
+            # 获取目标信息
             target_info = {
                 "target_id": str(query.launcher_id),
                 "sender_id": str(query.sender_id), 
                 "target_type": str(query.launcher_type).split(".")[-1].lower(),
             }
             
+            self.ap.logger.debug(f"解析时间描述: '{time_description}'")
+            
             # 解析时间
             target_time = await self._parse_time_natural(time_description)
             if not target_time:
-                return f"⚠️ 时间格式无法识别：{time_description}。请使用如'30分钟后'、'明天下午3点'、'今晚8点'等格式"
+                suggestions = [
+                    "• 相对时间：30分钟后、2小时后、3天后",
+                    "• 具体日期：明天下午3点、后天晚上8点",  
+                    "• 星期时间：本周六晚上9点、下周一上午10点",
+                    "• 标准格式：2025-06-08 15:30"
+                ]
+                return f"⚠️ 无法理解时间 '{time_description}'\n\n支持的格式示例：\n" + "\n".join(suggestions)
 
             # 检查时间是否已过
             if target_time <= datetime.now():
@@ -134,13 +163,15 @@ class ReminderPlugin(BasePlugin):
             # 安排提醒任务
             await self._schedule_reminder(reminder_id, reminder_data)
 
-            # 返回确认信息
-            time_str_formatted = target_time.strftime("%Y-%m-%d %H:%M")
-            repeat_info = f"，重复类型：{repeat_type}" if repeat_type != "不重复" else ""
+            # 返回确认信息，包含星期信息
+            time_str_formatted = target_time.strftime("%Y年%m月%d日 %H:%M")
+            weekday_names = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
+            weekday = weekday_names[target_time.weekday()]
+            repeat_info = f"\n🔄 重复：{repeat_type}" if repeat_type != "不重复" else ""
             
             self.ap.logger.info(f"🎯 用户 {target_info['sender_id']} 设置提醒成功: {content} 在 {time_str_formatted}")
             
-            return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted}\n📝 内容：{content}{repeat_info}"
+            return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}{repeat_info}"
 
         except Exception as e:
             self.ap.logger.error(f"❌ 设置提醒失败: {e}")
@@ -182,8 +213,11 @@ class ReminderPlugin(BasePlugin):
     async def _parse_time_natural(self, time_str: str) -> datetime:
         """增强的自然语言时间解析"""
         try:
+            self.ap.logger.debug(f"开始解析时间: '{time_str}'")
+            
             # 预处理时间字符串
             processed_time = await self._preprocess_time_string(time_str)
+            self.ap.logger.debug(f"预处理后: '{processed_time}'")
             
             # 尝试多种解析策略
             parsers = [
@@ -197,12 +231,14 @@ class ReminderPlugin(BasePlugin):
             for parser in parsers:
                 result = await parser(processed_time)
                 if result and result > datetime.now():
+                    self.ap.logger.debug(f"解析成功 ({parser.__name__}): {result}")
                     return result
             
             # 如果所有方法都失败，尝试原始字符串
             for parser in parsers:
                 result = await parser(time_str)
                 if result and result > datetime.now():
+                    self.ap.logger.debug(f"原始字符串解析成功 ({parser.__name__}): {result}")
                     return result
                     
             return None
@@ -464,6 +500,7 @@ class ReminderPlugin(BasePlugin):
             result = result.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
         return result
+
     async def _schedule_reminder(self, reminder_id: str, reminder_data: Dict):
         """安排提醒任务"""
         try:
@@ -488,19 +525,23 @@ class ReminderPlugin(BasePlugin):
             if reminder_id in self.reminders and self.reminders[reminder_id].get('active', True):
                 reminder_data = self.reminders[reminder_id]
                 
-                # 发送提醒消息
-                try:
-                    await self._send_reminder_message(reminder_data)
-                    self.ap.logger.info(f"🎯 提醒任务 {reminder_id} 执行成功")
-                except Exception as send_error:
-                    self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 发送失败: {send_error}")
-                    # 如果发送失败，可以选择重试一次
-                    await asyncio.sleep(30)  # 等待30秒
+                # 发送提醒消息，最多重试3次
+                max_retries = 3
+                for attempt in range(max_retries):
                     try:
                         await self._send_reminder_message(reminder_data)
-                        self.ap.logger.info(f"🎯 提醒任务 {reminder_id} 重试成功")
-                    except Exception as retry_error:
-                        self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 重试也失败: {retry_error}")
+                        self.ap.logger.info(f"🎯 提醒任务 {reminder_id} 执行成功")
+                        break
+                    except Exception as send_error:
+                        self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 发送失败 (尝试 {attempt + 1}/{max_retries}): {send_error}")
+                        if attempt < max_retries - 1:
+                            # 等待时间递增：30秒、60秒、90秒
+                            wait_time = 30 * (attempt + 1)
+                            self.ap.logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            self.ap.logger.error(f"❌ 提醒任务 {reminder_id} 所有重试均失败")
+                            # 可以考虑保存失败的提醒到一个特殊列表中
                 
                 # 处理重复提醒
                 await self._handle_repeat_reminder(reminder_id, reminder_data)
@@ -513,17 +554,31 @@ class ReminderPlugin(BasePlugin):
             self.ap.logger.error(traceback.format_exc())
 
     async def _send_reminder_message(self, reminder_data: Dict):
-        """发送提醒消息"""
+        """发送提醒消息（改进版）"""
         try:
             message_content = f"⏰ 提醒：{reminder_data['content']}"
             
-            # 获取适配器
-            adapters = self.host.get_platform_adapters()
-            if not adapters:
-                self.ap.logger.error("没有可用的平台适配器")
-                return
+            # 获取可用的适配器
+            adapter = await self._get_available_adapter()
+            if not adapter:
+                raise Exception("没有可用的平台适配器")
             
-            # 构建消息链 - 参考Waifu插件的实现
+            # 检查适配器状态
+            try:
+                # 尝试一个简单的API调用来检查连接
+                # 这个方法可能需要根据你使用的适配器类型调整
+                if hasattr(adapter, 'is_connected'):
+                    if not await adapter.is_connected():
+                        raise Exception("适配器未连接")
+            except Exception as e:
+                self.ap.logger.warning(f"适配器状态检查失败: {e}")
+                # 清除缓存，下次重新获取
+                self.adapter_cache = None
+                adapter = await self._get_available_adapter()
+                if not adapter:
+                    raise Exception("重新获取适配器失败")
+            
+            # 构建消息链
             if reminder_data['target_type'] == 'group':
                 # 群聊中@用户
                 message_chain = platform_types.MessageChain([
@@ -536,23 +591,53 @@ class ReminderPlugin(BasePlugin):
                     platform_types.Plain(message_content)
                 ])
             
-            # 使用 host.send_active_message 方法 - 参考Waifu和Async_Task_runner的实现
-            await self.host.send_active_message(
-                adapter=adapters[0],
-                target_type=reminder_data['target_type'],
-                target_id=reminder_data['target_id'],
-                message=message_chain
-            )
+            # 记录详细信息用于调试
+            self.ap.logger.debug(f"准备发送消息: target_type={reminder_data['target_type']}, target_id={reminder_data['target_id']}")
             
-            self.ap.logger.info(f"✅ 成功发送提醒给 {reminder_data['sender_id']}: {message_content}")
+            # 使用 host.send_active_message 方法
+            try:
+                await self.host.send_active_message(
+                    adapter=adapter,
+                    target_type=reminder_data['target_type'],
+                    target_id=reminder_data['target_id'],
+                    message=message_chain
+                )
+                
+                self.ap.logger.info(f"✅ 成功发送提醒给 {reminder_data['sender_id']}: {message_content}")
+                
+            except Exception as send_error:
+                # 如果是ApiNotAvailable错误，尝试使用备用方法
+                if "ApiNotAvailable" in str(send_error):
+                    self.ap.logger.warning("API不可用，尝试备用发送方法...")
+                    
+                    # 清除适配器缓存
+                    self.adapter_cache = None
+                    
+                    # 等待一下再重试
+                    await asyncio.sleep(2)
+                    
+                    # 重新获取适配器
+                    adapter = await self._get_available_adapter()
+                    if not adapter:
+                        raise Exception("无法获取可用的适配器")
+                    
+                    # 再次尝试发送
+                    await self.host.send_active_message(
+                        adapter=adapter,
+                        target_type=reminder_data['target_type'],
+                        target_id=reminder_data['target_id'],
+                        message=message_chain
+                    )
+                    
+                    self.ap.logger.info(f"✅ 备用方法成功发送提醒")
+                else:
+                    raise send_error
             
         except Exception as e:
             self.ap.logger.error(f"❌ 发送提醒消息失败: {e}")
             import traceback
             self.ap.logger.error(traceback.format_exc())
             raise
-
-
 
     async def _handle_repeat_reminder(self, reminder_id: str, reminder_data: Dict):
         """处理重复提醒"""
@@ -575,7 +660,11 @@ class ReminderPlugin(BasePlugin):
             elif repeat_type == '每周':
                 next_time = current_time + timedelta(weeks=1)
             elif repeat_type == '每月':
-                next_time = current_time + timedelta(days=30)  # 简化处理
+                # 更准确的月份计算
+                if current_time.month == 12:
+                    next_time = current_time.replace(year=current_time.year + 1, month=1)
+                else:
+                    next_time = current_time.replace(month=current_time.month + 1)
             
             if next_time:
                 # 更新提醒时间
@@ -701,20 +790,20 @@ class ReminderPlugin(BasePlugin):
 
 🤖 AI智能设置（推荐）：
 直接对我说话，例如：
-• "提醒我30分钟后开会"
-• "明天下午3点提醒我买菜"
-• "每天晚上8点提醒我吃药"
+- "提醒我30分钟后开会"
+- "明天下午3点提醒我买菜"
+- "每天晚上8点提醒我吃药"
 
 📋 手动管理命令：
-• 查看提醒 - 查看所有提醒
-• 删除提醒 [序号] - 删除指定提醒
-• 暂停提醒 [序号] - 暂停指定提醒
-• 恢复提醒 [序号] - 恢复指定提醒
+- 查看提醒 - 查看所有提醒
+- 删除提醒 [序号] - 删除指定提醒
+- 暂停提醒 [序号] - 暂停指定提醒
+- 恢复提醒 [序号] - 恢复指定提醒
 
 ⏰ 支持的时间格式：
-• 相对时间：30分钟后、2小时后、明天
-• 绝对时间：今晚8点、明天下午3点
-• 重复类型：每天、每周、每月
+- 相对时间：30分钟后、2小时后、明天
+- 绝对时间：今晚8点、明天下午3点
+- 重复类型：每天、每周、每月
 
 💡 使用技巧：
 AI会自动理解你的自然语言，无需记忆复杂命令格式！"""
