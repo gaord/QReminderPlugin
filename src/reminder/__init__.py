@@ -1,7 +1,17 @@
 """
-QReminderPlugin - 智能定时提醒插件
-支持设置单次和重复提醒，基于自然语言理解
+QReminderPlugin - A smart reminder plugin
 """
 
 __version__ = "1.3.0"
-__author__ = "Wedjat98" 
+
+from .core.reminder_manager import ReminderManager
+from .handlers.message_handler import MessageHandler
+from .models.reminder import Reminder
+from .utils.time_parser import TimeParser
+
+__all__ = [
+    'ReminderManager',
+    'MessageHandler',
+    'Reminder',
+    'TimeParser',
+] 
