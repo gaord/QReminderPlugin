@@ -4,9 +4,10 @@ metadata:
   author: Wedjat98
   name: QReminderPlugin
   repository: 'https://github.com/Wedjat98/QReminderPlugin'
-  version: 1.1.0
+  version: 1.0.1
   description:
-    zh_CN: 功能强大的定时提醒插件，支持单次和重复提醒
+    en_US: A powerful reminder plugin with support for one-time and recurring reminders (v1.0.1 - Fixed message sending issues)
+    zh_CN: 功能强大的定时提醒插件，支持单次和重复提醒 (v1.0.1 - 已修复消息发送问题)
   label:
     en_US: Reminder Plugin
     zh_CN: 定时提醒插件
@@ -14,8 +15,10 @@ spec:
   config:
     - name: max_reminders_per_user
       label:
+        en_US: Max Reminders Per User
         zh_CN: 每个用户最大提醒数量
       description:
+        en_US: Maximum number of reminders each user can set
         zh_CN: 每个用户可以设置的最大提醒数量
       type: integer
       default: 50
@@ -23,8 +26,10 @@ spec:
     
     - name: reminder_advance_notice
       label:
+        en_US: Advance Notice (minutes)
         zh_CN: 提前通知时间（分钟）
       description:
+        en_US: Send an advance notice before the actual reminder
         zh_CN: 在正式提醒前发送提前通知
       type: integer
       default: 0
@@ -32,7 +37,8 @@ spec:
     
     - name: enable_group_reminders
       label:
-        zh_CN: 启用Q群提醒
+        en_US: Enable Group Reminders
+        zh_CN: 启用群组提醒
       description:
         en_US: Allow users to set reminders in group chats
         zh_CN: 允许用户在群聊中设置提醒
