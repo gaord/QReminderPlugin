@@ -3,16 +3,17 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import calendar
 import dateparser
 import logging
-from pkg.plugin.context import register, handler, llm_func, BasePlugin, APIHost, EventContext
-from pkg.plugin.events import *
+from pkg.plugin import register, host, logger
+from pkg.plugin.context import EventContext
+from pkg.plugin.host import APIHost
 import pkg.platform.types as platform_types
 
-from src.reminder.core.reminder_manager import ReminderManager
-from src.reminder.handlers.message_handler import MessageHandler
+from .src.reminder.core.reminder_manager import ReminderManager
+from .src.reminder.handlers.message_handler import MessageHandler
 
 # 配置日志
 logging.basicConfig(
@@ -22,23 +23,20 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 注册插件
-@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.3.0", author="Wedjat98")
-class ReminderPlugin(BasePlugin):
-
-    def __init__(self, host: APIHost):
-        self.host = host
+@register(name="QReminderPlugin", desc="智能定时提醒插件", version="1.3.0", author="admin")
+class ReminderPlugin:
+    def __init__(self):
         self.reminder_manager = ReminderManager()
-        self.message_handler = MessageHandler(self.reminder_manager, host)
+        self.message_handler = MessageHandler(self.reminder_manager)
         self.data_file = "reminders.json"
         self.running_tasks = {}  # 存储运行中的任务
         self.adapter_cache = None  # 缓存适配器
         self.last_adapter_check = None  # 最后检查适配器的时间
         
     async def initialize(self):
-        """异步初始化，加载已保存的提醒"""
+        """初始化插件"""
         await self.reminder_manager.initialize()
-        logger.info("🚀 提醒插件初始化完成")
+        logger.info("QReminderPlugin initialization completed")
 
     async def _get_available_adapter(self):
         """获取可用的适配器，带缓存机制"""
@@ -85,85 +83,46 @@ class ReminderPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"保存提醒数据失败: {e}")
 
-    @llm_func("set_reminder")
-    async def set_reminder_llm(self, query, content: str, time_description: str, repeat_type: str = "不重复"):
-        """AI函数调用接口：设置提醒
-        当用户说要设置提醒、定时任务等时调用此函数
-        
-        Args:
-            content(str): 提醒内容，例如："开会"、"吃药"、"买菜"等
-            time_description(str): 时间描述，支持自然语言，例如："30分钟后"、"明天下午3点"、"今晚8点"等
-            repeat_type(str): 重复类型，可选值："不重复"、"每天"、"每周"、"每月"
-            
-        Returns:
-            str: 设置结果信息
-        """
+    @register(name="set_reminder_llm", desc="设置提醒")
+    async def set_reminder_llm(self, ctx: EventContext, args: Dict[str, Any]) -> Optional[str]:
+        """设置提醒的LLM函数"""
         try:
-            # 移除可能的干扰词
-            time_description = time_description.replace("设置", "").replace("这里", "").strip()
-            
-            # 自动检测重复类型
-            if "每天" in time_description and repeat_type == "不重复":
-                repeat_type = "每天"
-                time_description = time_description.replace("每天", "")
-            elif "每周" in time_description and repeat_type == "不重复":
-                repeat_type = "每周"
-                time_description = time_description.replace("每周", "")
-            elif "每月" in time_description and repeat_type == "不重复":
-                repeat_type = "每月"
-                time_description = time_description.replace("每月", "")
-            
-            # 获取目标信息
-            target_info = {
-                "target_id": str(query.launcher_id),
-                "sender_id": str(query.sender_id), 
-                "target_type": str(query.launcher_type).split(".")[-1].lower(),
-            }
-            
-            logger.debug(f"解析时间描述: '{time_description}'")
-            
+            # 获取参数
+            content = args.get("content", "")
+            time_desc = args.get("time", "")
+            repeat_type = args.get("repeat_type", "不重复")
+            sender_id = args.get("sender_id", "")
+            target_id = args.get("target_id", "")
+            target_type = args.get("target_type", "person")
+
             # 创建提醒
             reminder = await self.reminder_manager.create_reminder(
-                sender_id=target_info['sender_id'],
-                target_id=target_info['target_id'],
-                target_type=target_info['target_type'],
+                sender_id=sender_id,
+                target_id=target_id,
+                target_type=target_type,
                 content=content,
-                time_description=time_description,
+                time_desc=time_desc,
                 repeat_type=repeat_type
             )
 
-            if not reminder:
-                suggestions = [
-                    "• 相对时间：30分钟后、2小时后、3天后",
-                    "• 具体日期：明天下午3点、后天晚上8点",  
-                    "• 星期时间：本周六晚上9点、下周一上午10点",
-                    "• 标准格式：2025-06-08 15:30"
-                ]
-                return f"⚠️ 无法理解时间 '{time_description}'\n\n支持的格式示例：\n" + "\n".join(suggestions)
-
-            # 返回确认信息，包含星期信息
-            time_str_formatted = reminder.target_time.strftime("%Y年%m月%d日 %H:%M")
-            weekday_names = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
-            weekday = weekday_names[reminder.target_time.weekday()]
-            repeat_info = f"\n🔄 重复：{repeat_type}" if repeat_type != "不重复" else ""
-            
-            logger.info(f"🎯 用户 {target_info['sender_id']} 设置提醒成功: {content} 在 {time_str_formatted}")
-            
-            return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}{repeat_info}"
+            if reminder:
+                return f"已设置提醒：{content}，时间：{time_desc}，重复类型：{repeat_type}"
+            else:
+                return "设置提醒失败，请检查时间格式是否正确"
 
         except Exception as e:
-            logger.error(f"❌ 设置提醒失败: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return f"❌ 设置提醒失败：{str(e)}"
+            logger.error(f"设置提醒时发生错误: {str(e)}")
+            return f"设置提醒失败：{str(e)}"
 
-    @handler(PersonNormalMessageReceived)
-    async def person_normal_message_received(self, ctx: EventContext):
-        await self.message_handler.handle_message(ctx, False)
+    @register(name="on_normal_message", desc="处理普通消息")
+    async def on_normal_message(self, ctx: EventContext, args: Dict[str, Any]) -> Optional[str]:
+        """处理普通消息"""
+        return await self.message_handler.handle_message(ctx, args)
 
-    @handler(GroupNormalMessageReceived)
-    async def group_normal_message_received(self, ctx: EventContext):
-        await self.message_handler.handle_message(ctx, True)
+    @register(name="on_group_message", desc="处理群组消息")
+    async def on_group_message(self, ctx: EventContext, args: Dict[str, Any]) -> Optional[str]:
+        """处理群组消息"""
+        return await self.message_handler.handle_message(ctx, args)
 
     async def _parse_time_natural(self, time_str: str) -> datetime:
         """增强的自然语言时间解析"""
@@ -767,7 +726,6 @@ AI会自动理解你的自然语言，无需记忆复杂命令格式！"""
         ctx.prevent_default()
 
     def __del__(self):
-        """插件卸载时取消所有任务"""
-        for task in self.running_tasks.values():
-            if not task.done():
-                task.cancel()
+        """插件卸载时取消所有运行中的任务"""
+        if hasattr(self, 'reminder_manager'):
+            self.reminder_manager.cancel_all_tasks()
