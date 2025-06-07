@@ -4,7 +4,7 @@ metadata:
   author: Wedjat98
   name: QReminderPlugin
   repository: 'https://github.com/Wedjat98/QReminderPlugin'
-  version: 1.0.1
+  version: 1.2.0
   description:
     en_US: A powerful reminder plugin with support for one-time and recurring reminders (v1.0.1 - Fixed message sending issues)
     zh_CN: 功能强大的定时提醒插件，支持单次和重复提醒 (v1.0.1 - 已修复消息发送问题)

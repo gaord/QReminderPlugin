@@ -13,7 +13,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.2.0", author="Wedjat98")
+#@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.2.0", author="Wedjat98")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
