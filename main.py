@@ -13,7 +13,7 @@ import pkg.platform.types as platform_types
 
 
 # 注册插件
-@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解", version="1.2.0", author="Wedjat98")
+@register(name="QReminderPlugin", description="智能定时提醒插件，支持设置单次和重复提醒，基于自然语言理解，支持多用户@和@all功能", version="1.2.1", author="Wedjat98")
 class ReminderPlugin(BasePlugin):
 
     def __init__(self, host: APIHost):
@@ -147,23 +147,41 @@ class ReminderPlugin(BasePlugin):
             except Exception as e:
                 self.ap.logger.warning(f"获取机器人微信ID失败: {e}")
             
-            # 只从消息链中获取@用户作为提醒目标，但要避免@机器人自己
+            # 处理@多个用户的情况，使用单一提醒记录存储多个目标用户
             self.ap.logger.debug(f"原始target_info: {target_info}")
             self.ap.logger.info(f"at_targets: {at_targets}, bot_id: {bot_id}")
             
-            # 过滤掉机器人自己的ID
-            valid_at_targets = [target for target in at_targets if target != bot_id] if bot_id else at_targets
-            self.ap.logger.info(f"有效at_targets: {valid_at_targets}")
-            if valid_at_targets:
-                # 如果有有效的@信息，使用第一个@的用户ID作为提醒目标
-                target_info["sender_id"] = valid_at_targets[0]
-                self.ap.logger.info(f"设置提醒目标为被@用户: {valid_at_targets[0]}")
-            elif at_targets and bot_id and at_targets[0] == bot_id:
-                # 如果只@了机器人自己，则提醒发送消息的用户
-                self.ap.logger.info(f"用户@了机器人自己，提醒目标设为发送者: {target_info['sender_id']}")
-            # 如果没有@任何人，默认提醒发送消息的用户自己
+            # 检测@all情况
+            message_text = ""
+            if query.message_chain:
+                for component in query.message_chain:
+                    if hasattr(component, 'text'):
+                        message_text += component.text
             
-            self.ap.logger.debug(f"最终target_info: {target_info}")
+            is_at_all = '@all' in message_text.lower() or '全体成员' in message_text or '@所有人' in message_text
+            
+            # 确定提醒目标列表
+            if is_at_all:
+                # @all情况
+                target_users = ['@all']
+                self.ap.logger.info(f"检测到@all，设置提醒目标为全体成员")
+            else:
+                # 过滤掉机器人自己的ID
+                valid_at_targets = [target for target in at_targets if target != bot_id] if bot_id else at_targets
+                self.ap.logger.info(f"有效at_targets: {valid_at_targets}")
+                
+                if valid_at_targets:
+                    # 如果有有效的@信息，使用所有@用户
+                    target_users = valid_at_targets
+                    self.ap.logger.info(f"设置提醒目标为被@用户: {valid_at_targets}")
+                elif at_targets and bot_id and at_targets[0] == bot_id:
+                    # 如果只@了机器人自己，则提醒发送消息的用户
+                    target_users = [target_info['sender_id']]
+                    self.ap.logger.info(f"用户@了机器人自己，提醒目标设为发送者: {target_info['sender_id']}")
+                else:
+                    # 如果没有@任何人，默认提醒发送消息的用户自己
+                    target_users = [target_info['sender_id']]
+                    self.ap.logger.info(f"没有@任何人，提醒目标设为发送者: {target_info['sender_id']}")
             
             self.ap.logger.debug(f"解析时间描述: '{time_description}'")
             
@@ -182,13 +200,15 @@ class ReminderPlugin(BasePlugin):
             if target_time <= datetime.now():
                 return "⚠️ 设置的时间已经过去了，请重新设置！"
 
-            # 生成提醒ID
-            reminder_id = f"{target_info['sender_id']}_{int(datetime.now().timestamp())}"
+            # 创建单一提醒记录，包含多个目标用户
+            base_timestamp = int(datetime.now().timestamp())
+            reminder_id = f"{target_info['sender_id']}_{base_timestamp}"
             
             # 创建提醒数据
             reminder_data = {
                 'id': reminder_id,
-                'sender_id': target_info['sender_id'],
+                'sender_id': target_info['sender_id'],  # 设置提醒的用户
+                'target_users': target_users,  # 存储多个目标用户的列表
                 'target_id': target_info['target_id'],
                 'target_type': target_info['target_type'],
                 'content': content,
@@ -200,20 +220,28 @@ class ReminderPlugin(BasePlugin):
 
             # 保存提醒
             self.reminders[reminder_id] = reminder_data
-            await self._save_reminders()
-
+            
             # 安排提醒任务
             await self._schedule_reminder(reminder_id, reminder_data)
+            
+            self.ap.logger.info(f"🎯 设置多用户提醒成功: {content} 在 {target_time}, 目标用户: {target_users}")
+            
+            # 保存提醒到文件
+            await self._save_reminders()
 
-            # 返回确认信息，包含星期信息
+            # 返回确认信息
             time_str_formatted = target_time.strftime("%Y年%m月%d日 %H:%M")
             weekday_names = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日']
             weekday = weekday_names[target_time.weekday()]
             repeat_info = f"\n🔄 重复：{repeat_type}" if repeat_type != "不重复" else ""
             
-            self.ap.logger.info(f"🎯 用户 {target_info['sender_id']} 设置提醒成功: {content} 在 {time_str_formatted}")
-            
-            return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}{repeat_info}"
+            # 根据目标用户类型返回确认信息
+            if '@all' in target_users:
+                return f"✅ 全体提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}\n🎯 目标：全体成员{repeat_info}"
+            elif len(target_users) == 1:
+                return f"✅ 提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}{repeat_info}"
+            else:
+                return f"✅ 多用户提醒设置成功！\n📅 时间：{time_str_formatted} ({weekday})\n📝 内容：{content}\n👥 提醒目标：{len(target_users)}个用户{repeat_info}"
 
         except Exception as e:
             self.ap.logger.error(f"❌ 设置提醒失败: {e}")
@@ -599,7 +627,7 @@ class ReminderPlugin(BasePlugin):
         """发送提醒消息（改进版）"""
         try:
             message_content = f"⏰ 提醒：{reminder_data['content']}"
-            
+            self.ap.logger.info(f"构建提醒消息，消息内容: {message_content}")
             # 获取可用的适配器
             adapter = await self._get_available_adapter()
             if not adapter:
@@ -621,13 +649,27 @@ class ReminderPlugin(BasePlugin):
                     raise Exception("重新获取适配器失败")
             
             # 构建消息链
+            target_users = reminder_data.get('target_users', [reminder_data.get('sender_id')])
+            
             if reminder_data['target_type'] == 'group':
-                # 群聊中@用户
-                self.ap.logger.debug(f"构建群聊提醒消息，@用户ID: {reminder_data['sender_id']}")
-                message_chain = platform_types.MessageChain([
-                    platform_types.At(reminder_data['sender_id']),
-                    platform_types.Plain(f" {message_content}")
-                ])
+                # 群聊中处理多用户@
+                message_components = []
+                
+                if 'notify@all' in target_users:
+                    # @all情况
+                    self.ap.logger.info(f"构建群聊@all提醒消息")
+                    message_components.extend([
+                        platform_types.AtAll(),
+                        platform_types.Plain(f" {message_content}")
+                    ])
+                else:
+                    # @多个具体用户
+                    self.ap.logger.info(f"构建群聊多用户提醒消息，@用户ID: {target_users}")
+                    for i, user_id in enumerate(target_users):
+                        message_components.append(platform_types.At(user_id))
+                    message_components.append(platform_types.Plain(f" {message_content}"))
+                
+                message_chain = platform_types.MessageChain(message_components)
             else:
                 # 私聊直接发送
                 message_chain = platform_types.MessageChain([
@@ -719,7 +761,7 @@ class ReminderPlugin(BasePlugin):
 
     async def _handle_list_reminders(self, ctx: EventContext, sender_id: str):
         """处理查看提醒列表"""
-        user_reminders = [r for r in self.reminders.values() if r['sender_id'] == sender_id and r.get('active', True)]
+        user_reminders = [r for r in self.reminders.values() if r['sender_id'] == sender_id]
         
         if not user_reminders:
             ctx.add_return("reply", ["您还没有设置任何提醒。"])
@@ -728,7 +770,17 @@ class ReminderPlugin(BasePlugin):
             for i, reminder in enumerate(user_reminders, 1):
                 time_str = datetime.fromisoformat(reminder['target_time']).strftime("%Y-%m-%d %H:%M")
                 status = "✅ 活跃" if reminder.get('active', True) else "⏸️ 暂停"
-                message += f"{i}. {reminder['content']} - {time_str} ({reminder['repeat_type']}) {status}\n"
+                
+                # 显示目标用户信息
+                target_users = reminder.get('target_users', [reminder.get('sender_id')])
+                if '@all' in target_users:
+                    target_info = "全体成员"
+                elif len(target_users) == 1:
+                    target_info = "自己"
+                else:
+                    target_info = f"{len(target_users)}个用户"
+                
+                message += f"{i}. {reminder['content']} - {time_str} ({reminder['repeat_type']}) - 目标: {target_info} {status}\n"
             
             ctx.add_return("reply", [message])
         
